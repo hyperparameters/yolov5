@@ -1,5 +1,4 @@
 import glob
-import math
 import os
 import random
 import shutil
@@ -8,6 +7,7 @@ from pathlib import Path
 from threading import Thread
 
 import cv2
+import math
 import numpy as np
 import torch
 from PIL import Image, ExifTags
@@ -62,22 +62,21 @@ def create_dataloader(path, imgsz, batch_size, stride, opt, hyp=None, augment=Fa
 
     batch_size = min(batch_size, len(dataset))
     nw = min([os.cpu_count() // world_size, batch_size if batch_size > 1 else 0, workers])  # number of workers
-    train_sampler = torch.utils.data.distributed.DistributedSampler(dataset) if rank != -1 else None
-    dataloader = InfiniteDataLoader (dataset,
+    sampler = torch.utils.data.distributed.DistributedSampler(dataset) if rank != -1 else None
+    dataloader = InfiniteDataLoader(dataset,
                                     batch_size=batch_size,
                                     num_workers=nw,
-                                    sampler=train_sampler,
+                                    sampler=sampler,
                                     pin_memory=True,
-                                    collate_fn=LoadImagesAndLabels.collate_fn)
+                                    collate_fn=LoadImagesAndLabels.collate_fn)  # torch.utils.data.DataLoader()
     return dataloader, dataset
 
 
 class InfiniteDataLoader(torch.utils.data.dataloader.DataLoader):
-    '''
-    Dataloader that reuses workers.
+    """ Dataloader that reuses workers.
 
     Uses same syntax as vanilla DataLoader.
-    '''
+    """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -93,12 +92,11 @@ class InfiniteDataLoader(torch.utils.data.dataloader.DataLoader):
 
 
 class _RepeatSampler(object):
-    ''' 
-    Sampler that repeats forever. 
+    """ Sampler that repeats forever.
 
     Args:
         sampler (Sampler)
-    '''
+    """
 
     def __init__(self, sampler):
         self.sampler = sampler
@@ -106,14 +104,14 @@ class _RepeatSampler(object):
     def __iter__(self):
         while True:
             yield from iter(self.sampler)
-            
+
 
 class LoadImages:  # for inference
     def __init__(self, path, img_size=640):
         p = str(Path(path))  # os-agnostic
         p = os.path.abspath(p)  # absolute path
         if '*' in p:
-            files = sorted(glob.glob(p))  # glob
+            files = sorted(glob.glob(p, recursive=True))  # glob
         elif os.path.isdir(p):
             files = sorted(glob.glob(os.path.join(p, '*.*')))  # dir
         elif os.path.isfile(p):
@@ -365,8 +363,8 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         self.stride = stride
 
         # Define labels
-        self.label_files = [x.replace('images', 'labels').replace(os.path.splitext(x)[-1], '.txt') for x in
-                            self.img_files]
+        sa, sb = os.sep + 'images' + os.sep, os.sep + 'labels' + os.sep  # /images/, /labels/ substrings
+        self.label_files = [x.replace(sa, sb, 1).replace(os.path.splitext(x)[-1], '.txt') for x in self.img_files]
 
         # Check cache
         cache_path = str(Path(self.label_files[0]).parent) + '.cache'  # cached labels
@@ -518,7 +516,8 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
             index = self.indices[index]
 
         hyp = self.hyp
-        if self.mosaic:
+        mosaic = self.mosaic and random.random() < hyp['mosaic']
+        if mosaic:
             # Load mosaic
             img, labels = load_mosaic(self, index)
             shapes = None
@@ -552,7 +551,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
 
         if self.augment:
             # Augment imagespace
-            if not self.mosaic:
+            if not mosaic:
                 img, labels = random_perspective(img, labels,
                                                  degrees=hyp['degrees'],
                                                  translate=hyp['translate'],
@@ -662,7 +661,7 @@ def load_mosaic(self, index):
             x1b, y1b, x2b, y2b = 0, h - (y2a - y1a), min(w, x2a - x1a), h
         elif i == 2:  # bottom left
             x1a, y1a, x2a, y2a = max(xc - w, 0), yc, xc, min(s * 2, yc + h)
-            x1b, y1b, x2b, y2b = w - (x2a - x1a), 0, max(xc, w), min(y2a - y1a, h)
+            x1b, y1b, x2b, y2b = w - (x2a - x1a), 0, w, min(y2a - y1a, h)
         elif i == 3:  # bottom right
             x1a, y1a, x2a, y2a = xc, yc, min(xc + w, s * 2), min(s * 2, yc + h)
             x1b, y1b, x2b, y2b = 0, 0, min(w, x2a - x1a), min(y2a - y1a, h)
@@ -684,14 +683,10 @@ def load_mosaic(self, index):
     # Concat/clip labels
     if len(labels4):
         labels4 = np.concatenate(labels4, 0)
-        # np.clip(labels4[:, 1:] - s / 2, 0, s, out=labels4[:, 1:])  # use with center crop
-        np.clip(labels4[:, 1:], 0, 2 * s, out=labels4[:, 1:])  # use with random_affine
-
-        # Replicate
-        # img4, labels4 = replicate(img4, labels4)
+        np.clip(labels4[:, 1:], 0, 2 * s, out=labels4[:, 1:])  # use with random_perspective
+        # img4, labels4 = replicate(img4, labels4)  # replicate
 
     # Augment
-    # img4 = img4[s // 2: int(s * 1.5), s // 2:int(s * 1.5)]  # center crop (WARNING, requires box pruning)
     img4, labels4 = random_perspective(img4, labels4,
                                        degrees=self.hyp['degrees'],
                                        translate=self.hyp['translate'],
