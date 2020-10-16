@@ -23,7 +23,8 @@ class Conv(nn.Module):
         super(Conv, self).__init__()
         self.conv = nn.Conv2d(c1, c2, k, s, autopad(k, p), groups=g, bias=False)
         self.bn = nn.BatchNorm2d(c2)
-        self.act = nn.Hardswish() if act else nn.Identity()
+        self.act = nn.LeakyReLU(negative_slope=0.1, inplace=True) #nn.Hardswish() if act else nn.Identity()
+
 
     def forward(self, x):
         return self.act(self.bn(self.conv(x)))
@@ -85,7 +86,9 @@ class Focus(nn.Module):
         self.conv = Conv(c1 * 4, c2, k, s, p, g, act)
 
     def forward(self, x):  # x(b,c,w,h) -> y(b,4c,w/2,h/2)
-        return self.conv(torch.cat([x[..., ::2, ::2], x[..., 1::2, ::2], x[..., ::2, 1::2], x[..., 1::2, 1::2]], 1))
+        x = torch.cat([x[..., ::2, ::2], x[..., 1::2, ::2], x[..., ::2, 1::2], x[..., 1::2, 1::2]], 1)
+        x = self.conv(x)
+        return x
 
 
 class Concat(nn.Module):
